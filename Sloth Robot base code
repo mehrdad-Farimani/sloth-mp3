@@ -1,0 +1,221 @@
+#include <ESP32Servo.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include <WiFi.h>
+#include <Audio.h>
+
+// Define network credentials
+const char* ssid = "Skeppstedt";
+const char* password = "Torsk_44!";
+
+// Define MP3 URL
+const char* mp3URL = "https://github.com/mehrdad-Farimani/sloth-mp3/raw/main/I%20m%20Boo%20A%20robot%20slot.mp3";
+
+// Create audio object
+Audio audio;
+
+// Define MPU6050 and thresholds
+MPU6050 mpu;
+const int moveThreshold = 2000; // Increase this value for less sensitivity to movement
+const float orientationThreshold = 25.0; // Degrees tolerance for orientations
+
+// Define GPIO pins for the servos and feedback
+#define SERVO_PIN1 14
+#define FEEDBACK_PIN1 13
+#define SERVO_PIN2 12
+#define FEEDBACK_PIN2 11
+#define SERVO_PIN3 10
+#define FEEDBACK_PIN3 9
+
+// Create servo objects
+Servo servo1;
+Servo servo2;
+Servo servo3;
+
+// Define GPIO pins for touch sensors
+#define TOUCH_SENSOR_PIN1 7 // Head
+#define TOUCH_SENSOR_PIN2 6 // Spine
+#define TOUCH_SENSOR_PIN3 5 // Belly
+
+// Define GPIO pin for vibration motor (via H-bridge)
+#define VIBRATION_MOTOR_PIN 2
+
+// Define GPIO pins for MPU6050 (IMU)
+#define MPU6050_SCL 17
+#define MPU6050_SDA 18
+
+// State variables
+bool touchingHead = false;
+bool touchingSpine = false;
+bool touchingBelly = false;
+
+// Sleep mode timeout
+unsigned long lastActivityTime = 0;
+const unsigned long sleepTimeout = 10000; // 10 seconds
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(115200);
+  delay(1000);
+
+  // Initialize servos
+  servo1.attach(SERVO_PIN1);
+  servo2.attach(SERVO_PIN2);
+  servo3.attach(SERVO_PIN3);
+
+  // Move servos to initial positions
+  servo1.write(readServoFeedback(FEEDBACK_PIN1));
+  servo2.write(readServoFeedback(FEEDBACK_PIN2));
+  servo3.write(readServoFeedback(FEEDBACK_PIN3));
+
+  // Initialize touch sensors
+  pinMode(TOUCH_SENSOR_PIN1, INPUT);
+  pinMode(TOUCH_SENSOR_PIN2, INPUT);
+  pinMode(TOUCH_SENSOR_PIN3, INPUT);
+
+  // Initialize vibration motor
+  pinMode(VIBRATION_MOTOR_PIN, OUTPUT);
+  digitalWrite(VIBRATION_MOTOR_PIN, LOW); // Initially off
+
+  // Initialize MPU6050
+  Wire.begin(MPU6050_SDA, MPU6050_SCL);
+  mpu.initialize();
+
+  // Verify MPU6050 connection
+  Serial.println(mpu.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi...");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected to WiFi");
+
+  // Configure I2S for the MAX98357A
+  audio.setPinout(19, 20, 21);  // BCLK, LRC, DIN
+  audio.setVolume(10);  // Volume control 0...21
+
+  // Connect to the MP3 URL
+  Serial.println("Connecting to MP3 stream...");
+  audio.connecttohost(mp3URL);
+}
+
+void loop() {
+  audio.loop();
+
+  // Read accelerometer and gyroscope data
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+  
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  
+  // Calculate acceleration in g's
+  float accel_x = ax / 16384.0;
+  float accel_y = ay / 16384.0;
+  float accel_z = az / 16384.0;
+  
+  // Calculate orientation (roll and pitch) in degrees
+  float roll = atan2(accel_y, accel_z) * 180 / PI;
+  float pitch = atan(-accel_x / sqrt(accel_y * accel_y + accel_z * accel_z)) * 180 / PI;
+  
+  // Determine if the IMU is moving
+  bool moving = (abs(ax) > moveThreshold || abs(ay) > moveThreshold || abs(az) > moveThreshold);
+  
+  // Check touch sensors
+  touchingHead = digitalRead(TOUCH_SENSOR_PIN1);
+  touchingSpine = digitalRead(TOUCH_SENSOR_PIN2);
+  touchingBelly = digitalRead(TOUCH_SENSOR_PIN3);
+
+  // Determine current mode
+  if (moving) {
+    // Moving mode
+    lastActivityTime = millis();
+    Serial.println("Moving mode");
+    pulseVibrationMotor();
+    playSound();
+    // Move servos to create a gentle rocking motion
+    moveServos(10, 500);
+  } else if (millis() - lastActivityTime > sleepTimeout) {
+    // Sleep mode
+    Serial.println("Sleep mode");
+    // Turn off servos and motor to save energy
+    disableServos();
+    digitalWrite(VIBRATION_MOTOR_PIN, LOW);
+  } else if (abs(pitch - 90) <= orientationThreshold || abs(pitch + 90) <= orientationThreshold) {
+    // Laying down mode (sides)
+    Serial.println("Laying down mode (sides)");
+    moveServos(20, 2000);
+  } else if (abs(roll - 90) <= orientationThreshold || abs(roll + 90) <= orientationThreshold) {
+    // Sitting mode
+    Serial.println("Sitting mode");
+    servo1.write(90); // Initial position
+    servo2.write(180); // 90 degrees to the left
+    servo3.write(0);   // 90 degrees to the right
+  } else if (abs(accel_z - 90) <= orientationThreshold || abs(accel_z + 90) <= orientationThreshold) {
+    // Laying down mode (belly or back)
+    Serial.println("Laying down mode (belly or back)");
+    moveServos(10, 5000);
+  } else if (touchingHead || touchingSpine || touchingBelly) {
+    // Touching mode
+    lastActivityTime = millis();
+    Serial.println("Touching mode");
+    pulseVibrationMotor();
+    playSound();
+    moveServos(5, 1000);
+  } else if (touchingHead && touchingSpine && touchingBelly && abs(pitch - 90) <= orientationThreshold) {
+    // Cuddle mode
+    Serial.println("Cuddle mode");
+    pulseVibrationMotor(200); // Stronger heartbeat
+    // Do not move servos
+  }
+
+  delay(100); // Adjust delay as needed for reading frequency
+}
+
+void pulseVibrationMotor(int duration = 100) {
+  digitalWrite(VIBRATION_MOTOR_PIN, HIGH);
+  delay(duration);
+  digitalWrite(VIBRATION_MOTOR_PIN, LOW);
+}
+
+void moveServos(int angle, int delayTime) {
+  for (int pos = 90 - angle; pos <= 90 + angle; pos += 10) {
+    servo1.write(pos);
+    servo2.write(pos);
+    servo3.write(pos);
+    delay(delayTime); // Adjust delay for desired speed
+  }
+  for (int pos = 90 + angle; pos >= 90 - angle; pos -= 10) {
+    servo1.write(pos);
+    servo2.write(pos);
+    servo3.write(pos);
+    delay(delayTime); // Adjust delay for desired speed
+  }
+}
+
+void disableServos() {
+  servo1.detach();
+  servo2.detach();
+  servo3.detach();
+}
+
+void playSound() {
+  if (!audio.isRunning()) {
+    Serial.println("Reconnecting to MP3 stream...");
+    audio.connecttohost(mp3URL);
+  } else {
+    Serial.println("Playing MP3 stream...");
+  }
+}
+
+int readServoFeedback(int feedbackPin) {
+  pinMode(feedbackPin, INPUT);
+  int feedbackValue = analogRead(feedbackPin);
+  // Convert feedback value to angle (adjust based on your servo's feedback characteristics)
+  int angle = map(feedbackValue, 0, 1023, 0, 180);
+  return angle;
+}
