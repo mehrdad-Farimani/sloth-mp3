@@ -43,7 +43,7 @@ Servo servo2; // left arm
 Servo servo3; // right arm
 
 // GPIO pins for touch sensors
-#define TOUCH_SENSOR_PIN1 42 // Head
+#define TOUCH_SENSOR_PIN1 46 // Head
 #define TOUCH_SENSOR_PIN2 33 // Spine
 #define TOUCH_SENSOR_PIN3 26 // Belly
 
